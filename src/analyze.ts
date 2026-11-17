@@ -1,4 +1,4 @@
-import path from 'node:path';
+import { templatePath } from './bundled-files';
 
 import { analyzeToneOfVoice } from './analyzers/toneOfVoiceAnalyzer';
 
@@ -266,14 +266,6 @@ function containsStopPhrase(normalizedBody: string, normalizedPhrase: string): b
   return regex.test(normalizedBody);
 }
 
-function getTemplatePath(baseName: string, language: TemplateLanguage): string {
-  if (language === 'en') {
-    return path.join('templates', `${baseName}.en.md`);
-  }
-
-  return path.join('templates', `${baseName}.md`);
-}
-
 function getStatusLine(task: NormalizedTask, remarks: Remark[]): string {
   const text = LOCALIZED_TEXT[task.language];
   const errors = remarks.filter((remark) => remark.level === 'error');
@@ -363,7 +355,7 @@ function buildManagerChecklistComment(
   clarityFixSuggestionsMarkdown: string,
   managerRecommendations: string[]
 ): string {
-  const managerChecklistPath = getTemplatePath('manager-checklist', task.language);
+  const managerChecklistPath = templatePath('manager-checklist', task.language);
   const managerChecklist = readTextFile(managerChecklistPath);
   const text = LOCALIZED_TEXT[task.language];
   const remarksMarkdown = formatRemarks(task, remarks);

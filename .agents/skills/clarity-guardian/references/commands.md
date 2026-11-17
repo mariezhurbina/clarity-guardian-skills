@@ -1,18 +1,18 @@
 # Команды Clarity Guardian
 
-Запускайте команды из корня проекта. Для рабочих примеров замените пути на исходные файлы пользователя, а для результатов выберите отдельное имя в `reports/`.
+Запускайте команды из текущего проекта. Подставьте абсолютный путь к `scripts/run.cjs` из папки скилла вместо `$runner`. Для рабочих примеров замените пути на исходные файлы пользователя, а для результатов выберите отдельное имя в `reports/`.
 
 ## Задача, спринт и релиз
 
 ```sh
-npm run --silent analyze -- --input "task.json" --json-file "reports/analysis.json" --comment-file "reports/analysis.md"
-OPENAI_API_KEY='' npm run --silent generate:test-checklist -- --input "task.json" --comment-file "reports/checklist.md"
-npm run --silent v2:report -- --input "tasks.json" --out-dir "reports/backlog"
+node "$runner" analyze --input "task.json" --json-file "reports/analysis.json" --comment-file "reports/analysis.md"
+OPENAI_API_KEY='' node "$runner" generate:test-checklist --input "task.json" --comment-file "reports/checklist.md"
+node "$runner" v2:report --input "tasks.json" --out-dir "reports/backlog"
 ```
 
-Первая команда анализирует одну карточку или GitHub Issue/PR payload. Вторая создаёт QA-чек-лист по локальному шаблону. Для сводки с утверждённым снимком передайте `--baseline "approved.json"` в `v2:report`. Для демо SMART используйте `npm run smart:demo`.
+Первая команда анализирует одну карточку или GitHub Issue/PR payload. Вторая создаёт QA-чек-лист по локальному шаблону. Для сводки с утверждённым снимком передайте `--baseline "approved.json"` в `v2:report`. Для демо SMART передайте в `--input` результат `node "$runner" asset smart-demo-tasks.json`. Для ретро с историей статусов используйте `node "$runner" asset demo_tasks.json`.
 
-Для отдельных отчётов используйте шаблон `npm run --silent <команда> -- --input "tasks.json" --output "reports/<отчёт>.md"`. Для `project:pulse` выберите `.html`.
+Для отдельных отчётов используйте шаблон `node "$runner" <команда> --input "tasks.json" --output "reports/<отчёт>.md"`. Для `project:pulse` выберите `.html`.
 
 | Команда | Результат |
 | --- | --- |
@@ -38,16 +38,16 @@ npm run --silent v2:report -- --input "tasks.json" --out-dir "reports/backlog"
 
 - Для проверки готовности к передаче используйте [Agent Handoff](../../agent-handoff/SKILL.md).
 - Для сравнения с согласованным снимком используйте [Change Review](../../change-review/SKILL.md).
-- Для работы с заметками и открытыми вопросами используйте [Meeting Drafts](../../meeting-drafts/SKILL.md) через проектный MCP. `npm run build` создаёт исполняемый сервер.
-- Для перепроверки одобренной очереди выполните `npm run --silent drafts:check -- --approved "approved-drafts.json" --input "data/local/tasks.json"` со свежей выгрузкой.
-- Для локальной сводки PM Agent используйте `npm run --silent pm:agent -- --input "tasks.json" --output "reports/pm-agent.md"`. Подключение другого MCP-клиента и отдельный режим API описаны в [README](../../../../README.md#pm-agent).
+- Для работы с заметками и открытыми вопросами используйте [Meeting Drafts](../../meeting-drafts/SKILL.md) через `meeting:workspace`. Для отдельного MCP-клиента подключение описано в [README](../../../../README.md#подключение-другого-mcp-клиента).
+- Для перепроверки одобренной очереди выполните `node "$runner" drafts:check --approved "approved-drafts.json" --input "data/local/tasks.json"` со свежей выгрузкой.
+- Для локальной сводки PM Agent используйте `node "$runner" pm:agent --input "tasks.json" --output "reports/pm-agent.md"`. Подключение другого MCP-клиента и отдельный режим API описаны в [README](../../../../README.md#pm-agent).
 
 ## Источники и синхронизация
 
 ```sh
-npm run --silent backlog:import -- --source linear --team ENG --output "data/local/tasks.json"
-npm run --silent backlog:import -- --source gitlab --project group/project --output "data/local/tasks.json"
-npm run --silent fetch:yandex -- --output "data/local/tasks.json"
+node "$runner" backlog:import --source linear --team ENG --output "data/local/tasks.json"
+node "$runner" backlog:import --source gitlab --project group/project --output "data/local/tasks.json"
+node "$runner" fetch:yandex --output "data/local/tasks.json"
 ```
 
 Проверяйте выбранную команду, проект или очередь. Имена переменных окружения для доступа указаны в [README](../../../../README.md#интеграции).

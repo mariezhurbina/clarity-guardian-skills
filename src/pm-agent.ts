@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { bundledPath } from './bundled-files';
 import { formatAgentHandoffMarkdown } from './agent-handoff';
 import { formatChangeReviewMarkdown } from './change-review';
 import { extractTextFromOpenAIResponse } from './generate-test-checklist';
@@ -273,8 +274,8 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const demo = args.demo === true;
   const online = args.online === true;
-  const input = getStringArg(args, 'input') || (demo ? 'data/demo-tasks.json' : undefined);
-  const baseline = getStringArg(args, 'baseline') || (demo && !getStringArg(args, 'input') ? 'data/demo-scope-baseline.json' : undefined);
+  const input = getStringArg(args, 'input') || (demo ? bundledPath('data', 'demo-tasks.json') : undefined);
+  const baseline = getStringArg(args, 'baseline') || (demo && !getStringArg(args, 'input') ? bundledPath('data', 'demo-scope-baseline.json') : undefined);
   const question = normalizeText(getStringArg(args, 'ask') || (demo && online ? DEMO_QUESTION : ''));
   const notesPath = getStringArg(args, 'notes');
   const output = getStringArg(args, 'output');

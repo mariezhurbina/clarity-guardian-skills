@@ -1,4 +1,4 @@
-import path from 'node:path';
+import { templatePath } from './bundled-files';
 
 import {
   detectLanguage,
@@ -154,15 +154,6 @@ export async function generateChecklistWithOpenAI(
   return generatedText;
 }
 
-function loadLocalizedFallbackChecklist(task: NormalizedTask): string {
-  const templateName = task.language === 'en'
-    ? 'tester-checklist.en.md'
-    : 'tester-checklist.md';
-  const templatePath = path.join('templates', templateName);
-
-  return readTextFile(templatePath);
-}
-
 function wrapChecklistComment(
   task: NormalizedTask,
   checklistMarkdown: string,
@@ -247,7 +238,7 @@ export async function generateTestChecklist(
     };
   }
 
-  const fallback = loadLocalizedFallbackChecklist(normalizedTask);
+  const fallback = readTextFile(templatePath('tester-checklist', normalizedTask.language));
   const commentMarkdown = wrapChecklistComment(normalizedTask, fallback, 'fallback');
 
   return {

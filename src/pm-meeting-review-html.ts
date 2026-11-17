@@ -91,7 +91,8 @@ ${drafts.length ? `<div class="bar">
   <button id="download-approved" type="button" disabled>Скачать одобренные задачи</button>
 </div>
 <details><summary>Сверить перед переносом</summary>
-  <p class="meta">Скачайте одобренные задачи. Запустите из папки проекта, указав путь к скачанному файлу и свежей выгрузке.</p>
+  <p class="meta">Скачайте одобренные задачи. В Codex попросите скилл сверить скачанный файл со свежей выгрузкой. Из клона Clarity Guardian можно запустить команду ниже.</p>
+  <p><code>$clarity-guardian Перепроверь одобренные черновики из approved-drafts.json по свежей выгрузке.</code></p>
   <p><code>npm run --silent drafts:check -- --approved approved-drafts.json --input ${review.dataset === 'demo' ? 'data/demo-tasks.json' : 'data/local/tasks.json'}</code></p>
 </details>` : '<p class="card">Черновиков для переноса нет.</p>'}
 ${cards}

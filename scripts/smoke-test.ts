@@ -567,6 +567,67 @@ function smokeAgentHandoffInvalidInput(): void {
   assert(!fs.existsSync(output), 'Agent Handoff should not write a report for invalid input');
 }
 
+
+function smokePortableSkill(): void {
+  const workspace = fs.mkdtempSync(path.join(tmpDir, 'portable-skill-'));
+  const runner = path.join(rootDir, '.agents/skills/clarity-guardian/scripts/run.cjs');
+
+  function run(args: string[], request?: object): string {
+    const result = spawnSync(process.execPath, [runner, ...args], {
+      cwd: workspace,
+      input: request ? JSON.stringify(request) : undefined,
+      encoding: 'utf8'
+    });
+    assert(result.status === 0, `Portable skill failed: ${result.stderr}`);
+    return result.stdout;
+  }
+
+  run(['demo', '--out-dir', 'reports/portable-demo']);
+  assert(fs.existsSync(path.join(workspace, 'reports/portable-demo/meeting-review.html')),
+    'Portable demo should generate its browser workspace from bundled files');
+
+  const demoPath = run(['asset', 'demo-tasks.json']).trim();
+  fs.copyFileSync(demoPath, path.join(workspace, 'backlog.json'));
+  run(['agent:handoff', '--input', 'backlog.json', '--output', 'reports/handoff.json']);
+  const handoff = readJson<{ items: Array<{ taskId: string; status: string }> }>(
+    path.join(workspace, 'reports/handoff.json')
+  );
+  assert(handoff.items.some(task => task.taskId === 'CG-203' && task.status === 'ready_for_agent'),
+    'Portable Handoff should resolve input and output paths from the calling project');
+
+  const searches = [['CG-203']];
+  const prepared = JSON.parse(run(['meeting:workspace', '-'], {
+    tool: 'prepare_meeting',
+    args: { dataset: 'demo', queries: searches[0] }
+  }));
+  assert(prepared.candidates.some(({ taskId }: { taskId: string }) => taskId === 'CG-203'),
+    'Portable meeting should load the bundled demo from outside Clarity Guardian');
+
+  const notesFile = run(['asset', 'demo-meeting-notes.txt']).trim();
+  const saved = JSON.parse(run(['meeting:workspace', '-'], {
+    tool: 'save_drafts',
+    searches,
+    notesFile,
+    args: {
+      dataset: 'demo',
+      snapshotId: prepared.snapshotId,
+      drafts: [],
+      questions: [{
+        question: 'Нужна ли проверка на планшете?',
+        sourceQuote: 'Уточнить у QA, нужна ли отдельная проверка для планшета.'
+      }]
+    }
+  }));
+  const queue = readJson<{ status: string; review: { questions: unknown[] } }>(path.join(workspace, saved.path));
+  assert(queue.status === 'review_required' && queue.review.questions.length === 1,
+    'Portable meeting should validate and save the queue in the calling project');
+  const history = JSON.parse(run(['meeting:workspace', '-'], {
+    tool: 'list_meetings',
+    args: { dataset: 'demo', offset: 0 }
+  }));
+  assert(history.items[0]?.meetingId === saved.meetingId, 'Portable meeting history should be local to the calling project');
+}
+
 function runNodeAsync(
   args: string[],
   options: SmokeOptions = {}
@@ -2218,6 +2279,7 @@ async function smokeJiraSkip() {
     await smokeYandexTrackerApi();
     smokeV2Reports();
     smokeAgentHandoffInvalidInput();
+    smokePortableSkill();
     smokeRetroAnalytics();
     smokeRiskReadinessSprintHealth();
     smokeEvidenceBrief();

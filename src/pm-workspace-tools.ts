@@ -101,16 +101,31 @@ type Snapshot = {
   retrieved: Set<string>;
 };
 
-export function createWorkspaceTools(projectDir: string) {
+export function createWorkspaceTools(projectDir: string, options: {
+  demoDir?: string;
+  input?: string;
+  baseline?: string;
+} = {}) {
   const snapshots = new Map<Dataset, Snapshot>();
   const reportsDir = path.join(projectDir, 'reports', 'codex');
 
   function load(dataset: Dataset): Snapshot {
-    const tasksPath = path.join(projectDir, 'data', dataset === 'demo' ? 'demo-tasks.json' : 'local/tasks.json');
-    const baselinePath = path.join(projectDir, 'data', dataset === 'demo' ? 'demo-scope-baseline.json' : 'local/approved.json');
+    const demoDir = options.demoDir ?? path.join(projectDir, 'data');
+    const tasksPath = dataset === 'demo'
+      ? path.join(demoDir, 'demo-tasks.json')
+      : path.resolve(projectDir, options.input ?? 'data/local/tasks.json');
+    const baselinePath = dataset === 'demo'
+      ? path.join(demoDir, 'demo-scope-baseline.json')
+      : path.resolve(projectDir, options.baseline ?? 'data/local/approved.json');
+
+    if (dataset === 'working' && options.baseline && !existsSync(baselinePath)) {
+      throw makeCliError(`Согласованный снимок не найден: ${baselinePath}.`);
+    }
 
     if (dataset === 'working' && !existsSync(tasksPath)) {
-      throw makeCliError('Положи JSON-выгрузку бэклога в data/local/tasks.json. Для примера выбери dataset=demo.');
+      throw makeCliError(options.input
+        ? `Выгрузка бэклога не найдена: ${tasksPath}.`
+        : 'Положи JSON-выгрузку бэклога в data/local/tasks.json. Для примера выбери dataset=demo.');
     }
 
     const tasks = readJsonFile(tasksPath);

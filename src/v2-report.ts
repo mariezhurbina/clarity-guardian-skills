@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { bundledPath } from './bundled-files';
 import path from 'node:path';
 
 import {
@@ -85,8 +86,8 @@ import {
   writeTextFile
 } from './utils';
 
-const DEFAULT_DEMO_DATA_PATH = 'data/demo-tasks.json';
-const DEFAULT_DEMO_BASELINE_PATH = 'data/demo-scope-baseline.json';
+const DEFAULT_DEMO_DATA_PATH = bundledPath('data', 'demo-tasks.json');
+const DEFAULT_DEMO_BASELINE_PATH = bundledPath('data', 'demo-scope-baseline.json');
 const DEFAULT_OUT_DIR = 'reports/demo';
 
 function ensureDir(dirPath: string): void {

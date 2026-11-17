@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { bundledPath } from './bundled-files';
 import { createPmAgentTools } from './pm-agent-tools';
 import { buildMeetingQueue } from './pm-meeting-review';
 import { readTextFile } from './utils';
@@ -11,7 +12,7 @@ export function buildDemoMeetingReview(input: unknown, createdAt: string) {
 
   const before = tools.getRequirements(ref);
   const demoDecision = 'Согласовано для CG-203: проверить, что подсказка остаётся видимой после поворота смартфона в альбомную ориентацию.';
-  const notes = `${readTextFile('data/demo-meeting-notes.txt').trim()}\n${demoDecision}`;
+  const notes = `${readTextFile(bundledPath('data', 'demo-meeting-notes.txt')).trim()}\n${demoDecision}`;
   return buildMeetingQueue({
     dataset: 'demo',
     snapshotId: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
