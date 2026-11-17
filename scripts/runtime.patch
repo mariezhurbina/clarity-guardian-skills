@@ -1,0 +1,304 @@
+diff --git a/package.json b/package.json
+index 57beca9..3bf3423 100644
+--- a/package.json
++++ b/package.json
+@@ -22,6 +22,7 @@
+     "readiness": "npm run build --silent && node dist/readiness-report.js",
+     "sprint-health": "npm run build --silent && node dist/sprint-health-report.js",
+     "data:doctor": "npm run build --silent && node dist/data-doctor.js",
++    "meeting:workspace": "npm run build --silent && node dist/pm-workspace-cli.js",
+     "pm:mcp": "npm run build --silent && node dist/pm-mcp.js",
+     "pm:agent": "npm run build --silent && node dist/pm-agent.js",
+     "drafts:check": "npm run build --silent && node dist/pm-draft-transfer.js",
+diff --git a/src/agent-handoff.ts b/src/agent-handoff.ts
+index 251f5fd..e79921b 100644
+--- a/src/agent-handoff.ts
++++ b/src/agent-handoff.ts
+@@ -1,6 +1,6 @@
+ import { analyzeUnifiedTasks } from './analytics';
+ import { inferReportFormat, tableCell, writeReport } from './report-utils';
+-import { normalizeUnifiedTasks } from './task-model';
++import { getTaskRows, normalizeUnifiedTasks } from './task-model';
+ import {
+   findKeywords,
+   getAcceptanceCriteria,
+@@ -139,7 +139,12 @@ if (require.main === module) {
+       throw makeCliError('Для передачи задач поддерживаются форматы markdown и json');
+     }
+ 
+-    const tasks = normalizeUnifiedTasks(readJsonFile(input));
++    const snapshot = readJsonFile(input);
++    if (!getTaskRows(snapshot)) {
++      throw makeCliError('Ожидается массив задач или объект с массивом tasks.');
++    }
++
++    const tasks = normalizeUnifiedTasks(snapshot);
+     const report = buildAgentHandoffReport(analyzeUnifiedTasks(tasks));
+     writeReport(output, format === 'json' ? JSON.stringify(report, null, 2) : formatAgentHandoffMarkdown(report));
+   } catch (error) {
+diff --git a/src/analyze.ts b/src/analyze.ts
+index 413293b..044aebf 100644
+--- a/src/analyze.ts
++++ b/src/analyze.ts
+@@ -1,4 +1,4 @@
+-import path from 'node:path';
++import { templatePath } from './bundled-files';
+ 
+ import { analyzeToneOfVoice } from './analyzers/toneOfVoiceAnalyzer';
+ 
+@@ -266,14 +266,6 @@ function containsStopPhrase(normalizedBody: string, normalizedPhrase: string): b
+   return regex.test(normalizedBody);
+ }
+ 
+-function getTemplatePath(baseName: string, language: TemplateLanguage): string {
+-  if (language === 'en') {
+-    return path.join('templates', `${baseName}.en.md`);
+-  }
+-
+-  return path.join('templates', `${baseName}.md`);
+-}
+-
+ function getStatusLine(task: NormalizedTask, remarks: Remark[]): string {
+   const text = LOCALIZED_TEXT[task.language];
+   const errors = remarks.filter((remark) => remark.level === 'error');
+@@ -363,7 +355,7 @@ function buildManagerChecklistComment(
+   clarityFixSuggestionsMarkdown: string,
+   managerRecommendations: string[]
+ ): string {
+-  const managerChecklistPath = getTemplatePath('manager-checklist', task.language);
++  const managerChecklistPath = templatePath('manager-checklist', task.language);
+   const managerChecklist = readTextFile(managerChecklistPath);
+   const text = LOCALIZED_TEXT[task.language];
+   const remarksMarkdown = formatRemarks(task, remarks);
+diff --git a/src/bundled-files.ts b/src/bundled-files.ts
+new file mode 100644
+index 0000000..8eb8e39
+--- /dev/null
++++ b/src/bundled-files.ts
+@@ -0,0 +1,16 @@
++import { existsSync } from 'node:fs';
++import path from 'node:path';
++import type { TemplateLanguage } from './types';
++
++const parent = path.dirname(__dirname);
++const root = existsSync(path.join(parent, 'package.json')) ? parent : path.dirname(parent);
++
++export function bundledPath(...parts: string[]): string {
++  return path.join(root, ...parts);
++}
++
++export function templatePath(baseName: string, language: TemplateLanguage): string {
++  const file = language === 'en' ? `${baseName}.en.md` : `${baseName}.md`;
++  const local = path.join('templates', file);
++  return existsSync(local) ? local : bundledPath('templates', file);
++}
+diff --git a/src/generate-test-checklist.ts b/src/generate-test-checklist.ts
+index 1301d2d..bebe938 100644
+--- a/src/generate-test-checklist.ts
++++ b/src/generate-test-checklist.ts
+@@ -1,4 +1,4 @@
+-import path from 'node:path';
++import { templatePath } from './bundled-files';
+ 
+ import {
+   detectLanguage,
+@@ -154,15 +154,6 @@ export async function generateChecklistWithOpenAI(
+   return generatedText;
+ }
+ 
+-function loadLocalizedFallbackChecklist(task: NormalizedTask): string {
+-  const templateName = task.language === 'en'
+-    ? 'tester-checklist.en.md'
+-    : 'tester-checklist.md';
+-  const templatePath = path.join('templates', templateName);
+-
+-  return readTextFile(templatePath);
+-}
+-
+ function wrapChecklistComment(
+   task: NormalizedTask,
+   checklistMarkdown: string,
+@@ -247,7 +238,7 @@ export async function generateTestChecklist(
+     };
+   }
+ 
+-  const fallback = loadLocalizedFallbackChecklist(normalizedTask);
++  const fallback = readTextFile(templatePath('tester-checklist', normalizedTask.language));
+   const commentMarkdown = wrapChecklistComment(normalizedTask, fallback, 'fallback');
+ 
+   return {
+diff --git a/src/pm-agent.ts b/src/pm-agent.ts
+index e068ee3..24daf9e 100644
+--- a/src/pm-agent.ts
++++ b/src/pm-agent.ts
+@@ -1,4 +1,5 @@
+ import path from 'node:path';
++import { bundledPath } from './bundled-files';
+ import { formatAgentHandoffMarkdown } from './agent-handoff';
+ import { formatChangeReviewMarkdown } from './change-review';
+ import { extractTextFromOpenAIResponse } from './generate-test-checklist';
+@@ -273,8 +274,8 @@ async function main(): Promise<void> {
+   const args = parseArgs(process.argv);
+   const demo = args.demo === true;
+   const online = args.online === true;
+-  const input = getStringArg(args, 'input') || (demo ? 'data/demo-tasks.json' : undefined);
+-  const baseline = getStringArg(args, 'baseline') || (demo && !getStringArg(args, 'input') ? 'data/demo-scope-baseline.json' : undefined);
++  const input = getStringArg(args, 'input') || (demo ? bundledPath('data', 'demo-tasks.json') : undefined);
++  const baseline = getStringArg(args, 'baseline') || (demo && !getStringArg(args, 'input') ? bundledPath('data', 'demo-scope-baseline.json') : undefined);
+   const question = normalizeText(getStringArg(args, 'ask') || (demo && online ? DEMO_QUESTION : ''));
+   const notesPath = getStringArg(args, 'notes');
+   const output = getStringArg(args, 'output');
+diff --git a/src/pm-meeting-review-demo.ts b/src/pm-meeting-review-demo.ts
+index d800386..db43ab9 100644
+--- a/src/pm-meeting-review-demo.ts
++++ b/src/pm-meeting-review-demo.ts
+@@ -1,4 +1,5 @@
+ import { createHash } from 'node:crypto';
++import { bundledPath } from './bundled-files';
+ import { createPmAgentTools } from './pm-agent-tools';
+ import { buildMeetingQueue } from './pm-meeting-review';
+ import { readTextFile } from './utils';
+@@ -11,7 +12,7 @@ export function buildDemoMeetingReview(input: unknown, createdAt: string) {
+ 
+   const before = tools.getRequirements(ref);
+   const demoDecision = 'Согласовано для CG-203: проверить, что подсказка остаётся видимой после поворота смартфона в альбомную ориентацию.';
+-  const notes = `${readTextFile('data/demo-meeting-notes.txt').trim()}\n${demoDecision}`;
++  const notes = `${readTextFile(bundledPath('data', 'demo-meeting-notes.txt')).trim()}\n${demoDecision}`;
+   return buildMeetingQueue({
+     dataset: 'demo',
+     snapshotId: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
+diff --git a/src/pm-meeting-review-html.ts b/src/pm-meeting-review-html.ts
+index 0e40bb2..8af415f 100644
+--- a/src/pm-meeting-review-html.ts
++++ b/src/pm-meeting-review-html.ts
+@@ -91,7 +91,8 @@ ${drafts.length ? `<div class="bar">
+   <button id="download-approved" type="button" disabled>Скачать одобренные задачи</button>
+ </div>
+ <details><summary>Сверить перед переносом</summary>
+-  <p class="meta">Скачайте одобренные задачи. Запустите из папки проекта, указав путь к скачанному файлу и свежей выгрузке.</p>
++  <p class="meta">Скачайте одобренные задачи. В Codex попросите скилл сверить скачанный файл со свежей выгрузкой. Из клона Clarity Guardian можно запустить команду ниже.</p>
++  <p><code>$clarity-guardian Перепроверь одобренные черновики из approved-drafts.json по свежей выгрузке.</code></p>
+   <p><code>npm run --silent drafts:check -- --approved approved-drafts.json --input ${review.dataset === 'demo' ? 'data/demo-tasks.json' : 'data/local/tasks.json'}</code></p>
+ </details>` : '<p class="card">Черновиков для переноса нет.</p>'}
+ ${cards}
+diff --git a/src/pm-workspace-cli.ts b/src/pm-workspace-cli.ts
+new file mode 100644
+index 0000000..d16c901
+--- /dev/null
++++ b/src/pm-workspace-cli.ts
+@@ -0,0 +1,54 @@
++import { readFileSync } from 'node:fs';
++import { bundledPath } from './bundled-files';
++import { createWorkspaceTools, WORKSPACE_TOOLS } from './pm-workspace-tools';
++import { isTaskRow } from './task-model';
++import { makeCliError, readJsonFile, readTextFile } from './utils';
++
++function optionalPath(request: Record<string, unknown>, key: string): string | undefined {
++  const value = request[key];
++  if (value === undefined) return undefined;
++  if (typeof value !== 'string' || !value.trim()) throw makeCliError(`Укажи путь в поле ${key}.`);
++  return value;
++}
++
++function main(): void {
++  const requestPath = process.argv[2];
++  if (!requestPath) throw makeCliError('Укажи путь к JSON-запросу или - для чтения со stdin.');
++
++  const request: unknown = requestPath === '-'
++    ? JSON.parse(readFileSync(0, 'utf-8'))
++    : readJsonFile(requestPath);
++  if (!isTaskRow(request) || typeof request.tool !== 'string' || !isTaskRow(request.args) ||
++      !WORKSPACE_TOOLS.some(({ name }) => name === request.tool)) {
++    throw makeCliError('Передай имя инструмента в tool и объект параметров в args.');
++  }
++
++  const tools = createWorkspaceTools(process.cwd(), {
++    demoDir: bundledPath('data'),
++    input: optionalPath(request, 'input'),
++    baseline: optionalPath(request, 'baseline'),
++  });
++  const args = { ...request.args };
++
++  if (request.tool === 'save_drafts') {
++    if (!Array.isArray(request.searches) || request.searches.length === 0) {
++      throw makeCliError('Передай в searches массивы запросов, использованных для prepare_meeting.');
++    }
++    for (const queries of request.searches) {
++      tools.call('prepare_meeting', { dataset: args.dataset, queries });
++    }
++    const notesFile = optionalPath(request, 'notesFile');
++    if (notesFile) args.notes = readTextFile(notesFile);
++  }
++
++  const result = tools.call(request.tool, args);
++  if ('error' in result) throw makeCliError(String(result.error));
++  console.log(JSON.stringify(result, null, 2));
++}
++
++try {
++  main();
++} catch (error) {
++  console.error(error instanceof Error ? error.message : String(error));
++  process.exitCode = 1;
++}
+diff --git a/src/pm-workspace-tools.ts b/src/pm-workspace-tools.ts
+index fa2ad74..ff66d0e 100644
+--- a/src/pm-workspace-tools.ts
++++ b/src/pm-workspace-tools.ts
+@@ -101,16 +101,31 @@ type Snapshot = {
+   retrieved: Set<string>;
+ };
+ 
+-export function createWorkspaceTools(projectDir: string) {
++export function createWorkspaceTools(projectDir: string, options: {
++  demoDir?: string;
++  input?: string;
++  baseline?: string;
++} = {}) {
+   const snapshots = new Map<Dataset, Snapshot>();
+   const reportsDir = path.join(projectDir, 'reports', 'codex');
+ 
+   function load(dataset: Dataset): Snapshot {
+-    const tasksPath = path.join(projectDir, 'data', dataset === 'demo' ? 'demo-tasks.json' : 'local/tasks.json');
+-    const baselinePath = path.join(projectDir, 'data', dataset === 'demo' ? 'demo-scope-baseline.json' : 'local/approved.json');
++    const demoDir = options.demoDir ?? path.join(projectDir, 'data');
++    const tasksPath = dataset === 'demo'
++      ? path.join(demoDir, 'demo-tasks.json')
++      : path.resolve(projectDir, options.input ?? 'data/local/tasks.json');
++    const baselinePath = dataset === 'demo'
++      ? path.join(demoDir, 'demo-scope-baseline.json')
++      : path.resolve(projectDir, options.baseline ?? 'data/local/approved.json');
++
++    if (dataset === 'working' && options.baseline && !existsSync(baselinePath)) {
++      throw makeCliError(`Согласованный снимок не найден: ${baselinePath}.`);
++    }
+ 
+     if (dataset === 'working' && !existsSync(tasksPath)) {
+-      throw makeCliError('Положи JSON-выгрузку бэклога в data/local/tasks.json. Для примера выбери dataset=demo.');
++      throw makeCliError(options.input
++        ? `Выгрузка бэклога не найдена: ${tasksPath}.`
++        : 'Положи JSON-выгрузку бэклога в data/local/tasks.json. Для примера выбери dataset=demo.');
+     }
+ 
+     const tasks = readJsonFile(tasksPath);
+diff --git a/src/v2-report.ts b/src/v2-report.ts
+index 394ae36..8932f31 100644
+--- a/src/v2-report.ts
++++ b/src/v2-report.ts
+@@ -1,4 +1,5 @@
+ import fs from 'node:fs';
++import { bundledPath } from './bundled-files';
+ import path from 'node:path';
+ 
+ import {
+@@ -85,8 +86,8 @@ import {
+   writeTextFile
+ } from './utils';
+ 
+-const DEFAULT_DEMO_DATA_PATH = 'data/demo-tasks.json';
+-const DEFAULT_DEMO_BASELINE_PATH = 'data/demo-scope-baseline.json';
++const DEFAULT_DEMO_DATA_PATH = bundledPath('data', 'demo-tasks.json');
++const DEFAULT_DEMO_BASELINE_PATH = bundledPath('data', 'demo-scope-baseline.json');
+ const DEFAULT_OUT_DIR = 'reports/demo';
+ 
+ function ensureDir(dirPath: string): void {

@@ -5,6 +5,8 @@ install_clarity_guardian() (
   root=${CLARITY_GUARDIAN_INSTALL_DIR:-"$HOME/.local/share/clarity-guardian-codex"}
   skills=${CLARITY_GUARDIAN_SKILL_DIR:-"$HOME/.agents/skills"}
   source=${CLARITY_GUARDIAN_INSTALL_SOURCE:-https://github.com/mariezhurbina/clarity-guardian-skills.git}
+  engine=${CLARITY_GUARDIAN_ENGINE_SOURCE:-https://github.com/mariezhurbina/clarity-guardian.git}
+  engine_commit=382a22b0189f449256a687007c3c986d6e403c55
   names='clarity-guardian agent-handoff change-review meeting-drafts'
 
   for tool in git node npm; do
@@ -39,9 +41,23 @@ install_clarity_guardian() (
   temp=$(mktemp -d "$root/.install.XXXXXXXX")
   trap 'rm -rf "$temp"' EXIT
   trap 'exit 1' HUP INT TERM
-  git clone --quiet --depth 1 --single-branch --branch main -- "$source" "$temp/source"
-  version="$root/versions/$(git -C "$temp/source" rev-parse HEAD)"
+  git clone --quiet --depth 1 --single-branch --branch main -- "$source" "$temp/skill"
+  version="$root/versions/$(git -C "$temp/skill" rev-parse HEAD)"
   if [ ! -d "$version" ]; then
+    git init --quiet "$temp/source"
+    git -C "$temp/source" fetch --quiet --depth 1 "$engine" "$engine_commit"
+    git -C "$temp/source" checkout --quiet --detach FETCH_HEAD
+    git -C "$temp/source" apply "$temp/skill/scripts/runtime.patch"
+    engine_skills="$temp/source/.agents/skills"
+    main_skill="$engine_skills/clarity-guardian"
+    mkdir -p "$main_skill/scripts"
+    cp "$temp/skill/SKILL.md" "$main_skill/SKILL.md"
+    cp "$temp/skill/scripts/run.cjs" "$main_skill/scripts/run.cjs"
+    cp -R "$temp/skill/references" "$main_skill/"
+    for name in agent-handoff change-review meeting-drafts; do
+      mkdir -p "$engine_skills/$name"
+      cp "$temp/skill/shortcuts/$name/SKILL.md" "$engine_skills/$name/SKILL.md"
+    done
     (cd "$temp/source" && npm ci --include=dev --no-audit --no-fund && npm run build)
     node - "$temp/source" "$version" <<'JS'
 const { existsSync, renameSync } = require('node:fs');
@@ -63,7 +79,7 @@ JS
 
   ln -s "$version" "$temp/current"
   node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2]);' "$temp/current" "$current"
-  printf 'Installed $clarity-guardian and three companion skills in %s.\n' "$skills"
+  printf 'Installed $clarity-guardian and its shortcuts in %s.\n' "$skills"
   printf 'Open a new Codex chat in any local project.\n'
 )
 
