@@ -1,0 +1,128 @@
+name: Clarity Guardian
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+  pull_request_target:
+    types: [opened, edited, labeled, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  clarity-guardian:
+    name: Check task clarity
+    if: vars.CLARITY_GUARDIAN_BOT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Clarity Guardian from base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          npm ci
+
+      - name: Build TypeScript
+        shell: bash
+        run: |
+          npm run build
+
+      - name: Prepare event payload
+        shell: bash
+        run: |
+          node dist/prepare-event-payload.js \
+            --output clarity-event.json
+
+      - name: Analyze description
+        id: analyze
+        shell: bash
+        run: |
+          node dist/analyze.js \
+            --input clarity-event.json \
+            --comment-file clarity-analysis-comment.md \
+            --json-file clarity-analysis-result.json \
+            --updated-body-file clarity-updated-body.md
+
+          node dist/write-workflow-outputs.js \
+            --payload clarity-event.json \
+            --analysis clarity-analysis-result.json \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Sync GitHub analysis result
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node dist/sync-github.js \
+            --payload clarity-event.json \
+            --analysis clarity-analysis-result.json \
+            --analysis-comment clarity-analysis-comment.md
+
+      - name: Sync Jira analysis result
+        shell: bash
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_ISSUE_KEY_PATTERN: ${{ vars.JIRA_ISSUE_KEY_PATTERN }}
+          JIRA_UPDATE_DESCRIPTION: ${{ vars.JIRA_UPDATE_DESCRIPTION }}
+        run: |
+          node dist/sync-jira.js \
+            --skip-if-unconfigured \
+            --payload clarity-event.json \
+            --analysis clarity-analysis-result.json \
+            --analysis-comment clarity-analysis-comment.md
+
+      - name: Generate tester checklist
+        if: steps.analyze.outputs.is_ready == 'true'
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4o-mini
+        run: |
+          node dist/generate-test-checklist.js \
+            --input clarity-event.json \
+            --comment-file clarity-tester-checklist.md \
+            --json-file clarity-tester-checklist.json
+
+      - name: Sync GitHub tester checklist
+        if: steps.analyze.outputs.is_ready == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node dist/sync-github.js \
+            --payload clarity-event.json \
+            --checklist-comment clarity-tester-checklist.md
+
+      - name: Sync Jira tester checklist
+        if: steps.analyze.outputs.is_ready == 'true'
+        shell: bash
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_ISSUE_KEY_PATTERN: ${{ vars.JIRA_ISSUE_KEY_PATTERN }}
+        run: |
+          node dist/sync-jira.js \
+            --skip-if-unconfigured \
+            --payload clarity-event.json \
+            --checklist-comment clarity-tester-checklist.md
+
+      - name: Fail if blocking errors found
+        if: steps.analyze.outputs.has_errors == 'true'
+        shell: bash
+        run: |
+          echo "Clarity Guardian found blocking errors in task description."
+          exit 1

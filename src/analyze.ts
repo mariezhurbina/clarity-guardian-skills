@@ -1,0 +1,649 @@
+import path from 'node:path';
+
+import { analyzeToneOfVoice } from './analyzers/toneOfVoiceAnalyzer';
+
+import {
+  applyModeToLevel,
+  detectLanguage,
+  detectWorkItemType,
+  getRequiredSections,
+  getStopPhrases,
+  loadConfig
+} from './config';
+
+import {
+  calculateClarityScore,
+  type ClarityScoreResult,
+  formatClarityScoreMarkdown
+} from './clarity-score';
+import {
+  formatClarityFixSuggestionsMarkdown,
+  generateClarityFixSuggestions
+} from './clarity-fix-suggestions';
+
+import { generateManagerRecommendations } from './recommendations';
+import { analyzeSmartTask } from './smart/smartAnalyzer';
+import { formatSmartAnalysisMarkdown } from './smart/smartFormatter';
+
+import {
+  countNonWhitespaceChars,
+  extractFirstMarkdownSection,
+  getStringArg,
+  makeCliError,
+  normalizeText,
+  parseArgs,
+  readJsonFile,
+  readTextFile,
+  replaceManagedBlock,
+  stripManagedBlock,
+  writeJsonFile,
+  writeTextFile
+} from './utils';
+
+import type {
+  AnalysisResult,
+  ClarityMode,
+  NormalizedTask,
+  Remark,
+  ResolvedConfig,
+  SectionRuleConfig,
+  StopPhraseRuleConfig,
+  TaskPayload,
+  TemplateLanguage,
+  WorkItemType
+} from './types';
+
+import type { ToneAnalysisResult } from './types/toneOfVoice';
+import type { SmartAnalysisResult } from './smart/smartTypes';
+
+export {
+  analyzeRisk,
+  analyzeRisks,
+  analyzeTaskRisk
+} from './risk/risk-analyzer';
+export {
+  generateRiskReport
+} from './risk/risk-report';
+export type {
+  RiskAnalysisResult,
+  RiskCategory,
+  RiskInputTask,
+  RiskLevel
+} from './risk/risk-types';
+export {
+  analyzeSmartTask
+} from './smart/smartAnalyzer';
+export {
+  formatSmartAnalysisMarkdown
+} from './smart/smartFormatter';
+export type {
+  SmartAnalysisResult,
+  SmartAnalysisStatus,
+  SmartCriterionKey,
+  SmartCriterionResult,
+  SmartCriterionStatus
+} from './smart/smartTypes';
+
+const DESCRIPTION_START_MARKER = '<!-- clarity-guardian:description:start -->';
+const DESCRIPTION_END_MARKER = '<!-- clarity-guardian:description:end -->';
+
+const LOCALIZED_TEXT = {
+  ru: {
+    commentTitle: '## 🛡️ Clarity Guardian: проверка ясности задачи',
+    descriptionTitle: '## Clarity Guardian',
+    blocked: '🛑 Я остановил задачу: в описании не хватает обязательной ясности.',
+    warning: '⚠️ Задачу можно читать, но есть места, где легко начнётся испорченный телефон.',
+    ok: '✅ Описание выглядит достаточно ясным.',
+    objectLabel: 'Проверяемый объект',
+    typeLabel: 'Тип',
+    modeLabel: 'Режим',
+    languageLabel: 'Язык',
+    whatToFix: '### Что нужно поправить',
+    managerRecommendations: '### Рекомендации для менеджера',
+    noRemarks: 'Замечаний нет.',
+    error: 'Ошибка',
+    advice: 'Совет',
+    footer: 'Когда поправишь описание, я проверю его заново при следующем `edited` событии.',
+    missingSection: (section: string) => `Отсутствует обязательный раздел «## ${section}».`,
+    shortSection: (section: string, count: number) =>
+      `Раздел «## ${section}» есть, но он пустой или слишком короткий. Нужно минимум ${count} непробельных символов.`,
+    brokenWithoutSteps: 'Есть формулировка «не работает», но нет шагов воспроизведения. Добавь: что сделал пользователь, что произошло, что должно было произойти.'
+  },
+  en: {
+    commentTitle: '## 🛡️ Clarity Guardian: task clarity check',
+    descriptionTitle: '## Clarity Guardian',
+    blocked: '🛑 I stopped this task because the description is missing required clarity.',
+    warning: '⚠️ The task is readable, but some parts can still be misunderstood.',
+    ok: '✅ The description looks clear enough.',
+    objectLabel: 'Checked object',
+    typeLabel: 'Type',
+    modeLabel: 'Mode',
+    languageLabel: 'Language',
+    whatToFix: '### What to fix',
+    managerRecommendations: '### Manager recommendations',
+    noRemarks: 'No remarks.',
+    error: 'Error',
+    advice: 'Advice',
+    footer: 'After you update the description, I will check it again on the next `edited` event.',
+    missingSection: (section: string) => `Missing required section "## ${section}".`,
+    shortSection: (section: string, count: number) =>
+      `Section "## ${section}" exists, but it is empty or too short. It needs at least ${count} non-whitespace characters.`,
+    brokenWithoutSteps: 'The description says "not working", but does not include reproduction steps. Add what the user did, what happened, and what should have happened.'
+  }
+} as const;
+
+function detectBrokenWithoutReproductionSteps(
+  body: string,
+  language: TemplateLanguage,
+  mode: ClarityMode
+): Remark | null {
+  const normalized = normalizeText(body).toLowerCase();
+  const brokenPhrase = language === 'ru' ? 'не работает' : 'not working';
+
+  if (!normalized.includes(brokenPhrase)) {
+    return null;
+  }
+
+  const reproductionMarkers = language === 'ru'
+    ? [
+      'шаги',
+      'шаги воспроизведения',
+      'как воспроизвести',
+      'str',
+      'steps to reproduce',
+      'фактический результат',
+      'ожидаемый результат'
+    ]
+    : [
+      'steps',
+      'steps to reproduce',
+      'str',
+      'actual result',
+      'actual outcome',
+      'expected result',
+      'expected outcome'
+    ];
+
+  const hasReproductionContext = reproductionMarkers.some((marker) =>
+    normalized.includes(marker)
+  );
+
+  if (hasReproductionContext) {
+    return null;
+  }
+
+  return {
+    level: applyModeToLevel('error', mode),
+    code: 'broken_without_reproduction',
+    message: LOCALIZED_TEXT[language].brokenWithoutSteps
+  };
+}
+
+function getSectionHeadings(rule: SectionRuleConfig): string[] {
+  return [rule.section, ...(rule.aliases || [])];
+}
+
+export function analyzeRequiredSections(
+  body: string,
+  requiredSections: SectionRuleConfig[],
+  language: TemplateLanguage,
+  mode: ClarityMode,
+  workItemType: WorkItemType
+): Remark[] {
+  const remarks: Remark[] = [];
+
+  for (const rule of requiredSections) {
+    const section = rule.section;
+    const content = extractFirstMarkdownSection(body, getSectionHeadings(rule));
+    const level = applyModeToLevel(rule.level || 'error', mode);
+
+    if (content === null) {
+      remarks.push({
+        level,
+        code: rule.code || 'missing_section',
+        section,
+        workItemType,
+        message: rule.message || LOCALIZED_TEXT[language].missingSection(section)
+      });
+      continue;
+    }
+
+    const charsCount = countNonWhitespaceChars(content);
+    const minChars = rule.minNonWhitespaceChars || 20;
+
+    if (charsCount < minChars) {
+      remarks.push({
+        level,
+        code: 'empty_or_too_short_section',
+        section,
+        workItemType,
+        message: LOCALIZED_TEXT[language].shortSection(section, minChars)
+      });
+    }
+  }
+
+  return remarks;
+}
+
+export function analyzeStopPhrases(
+  body: string,
+  stopPhrases: StopPhraseRuleConfig[],
+  language: TemplateLanguage,
+  mode: ClarityMode
+): Remark[] {
+  const remarks: Remark[] = [];
+  const normalized = normalizeText(body).toLowerCase();
+
+  for (const rule of stopPhrases) {
+    const phrase = normalizeText(rule.phrase).toLowerCase();
+
+    if (phrase && containsStopPhrase(normalized, phrase)) {
+      remarks.push({
+        level: applyModeToLevel(rule.level || 'warning', mode),
+        code: rule.code || 'stop_phrase',
+        phrase: rule.phrase,
+        message: rule.message || `Stop phrase detected: ${rule.phrase}`
+      });
+    }
+  }
+
+  const brokenWithoutSteps = detectBrokenWithoutReproductionSteps(body, language, mode);
+
+  if (brokenWithoutSteps) {
+    remarks.push(brokenWithoutSteps);
+  }
+
+  return remarks;
+}
+
+function containsStopPhrase(normalizedBody: string, normalizedPhrase: string): boolean {
+  const escapedPhrase = normalizedPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(
+    `(?<![\\p{L}\\p{N}_])${escapedPhrase}(?![\\p{L}\\p{N}_])`,
+    'iu'
+  );
+
+  return regex.test(normalizedBody);
+}
+
+function getTemplatePath(baseName: string, language: TemplateLanguage): string {
+  if (language === 'en') {
+    return path.join('templates', `${baseName}.en.md`);
+  }
+
+  return path.join('templates', `${baseName}.md`);
+}
+
+function getStatusLine(task: NormalizedTask, remarks: Remark[]): string {
+  const text = LOCALIZED_TEXT[task.language];
+  const errors = remarks.filter((remark) => remark.level === 'error');
+
+  if (errors.length > 0) {
+    return text.blocked;
+  }
+
+  if (remarks.length > 0) {
+    return text.warning;
+  }
+
+  return text.ok;
+}
+
+function formatRemarks(task: NormalizedTask, remarks: Remark[]): string {
+  const text = LOCALIZED_TEXT[task.language];
+
+  return remarks.map((remark, index) => {
+    const icon = remark.level === 'error' ? '🛑' : '⚠️';
+    const levelText = remark.level === 'error' ? text.error : text.advice;
+
+    return `${index + 1}. ${icon} **${levelText}:** ${remark.message}`;
+  }).join('\n');
+}
+
+function buildClarityScoreBlock(clarityScore: ClarityScoreResult): string {
+  return formatClarityScoreMarkdown(clarityScore);
+}
+
+function buildScoreSummaryBlock(
+  clarityScore: ClarityScoreResult,
+  smartAnalysis: SmartAnalysisResult
+): string {
+  return [
+    '## Итоговые метрики',
+    '',
+    `- Clarity Score: ${clarityScore.score}/100`,
+    `- SMART Score: ${smartAnalysis.totalScore}/100`,
+    '',
+    'Clarity Score отвечает за качество описания задачи.',
+    'SMART Score отвечает за качество постановки цели.'
+  ].join('\n');
+}
+
+function buildToneOfVoiceBlock(toneOfVoice: ToneAnalysisResult): string {
+  const problematicPhrases = toneOfVoice.problematicPhrases.length > 0
+    ? toneOfVoice.problematicPhrases.map((item, index) =>
+      `${index + 1}. "${item.phrase}" - ${item.explanation}`
+    ).join('\n')
+    : 'Проблемных формулировок не найдено.';
+
+  return [
+    '## Tone of Voice Analyzer',
+    '',
+    `**Tone:** ${toneOfVoice.tone}`,
+    '',
+    `**Risk level:** ${toneOfVoice.riskLevel}`,
+    '',
+    `**Categories:** ${toneOfVoice.categories.join(', ')}`,
+    '',
+    '**Problematic phrases:**',
+    '',
+    problematicPhrases,
+    '',
+    '**Recommendation:**',
+    '',
+    toneOfVoice.recommendation,
+    '',
+    '**PM-friendly rewrite:**',
+    '',
+    toneOfVoice.rewrittenText || 'Не требуется.'
+  ].join('\n');
+}
+
+function formatRecommendations(recommendations: string[]): string {
+  return recommendations.map((recommendation) => `- ${recommendation}`).join('\n');
+}
+
+function buildManagerChecklistComment(
+  task: NormalizedTask,
+  remarks: Remark[],
+  mode: ClarityMode,
+  clarityScore: ClarityScoreResult,
+  smartAnalysis: SmartAnalysisResult,
+  toneOfVoice: ToneAnalysisResult,
+  clarityFixSuggestionsMarkdown: string,
+  managerRecommendations: string[]
+): string {
+  const managerChecklistPath = getTemplatePath('manager-checklist', task.language);
+  const managerChecklist = readTextFile(managerChecklistPath);
+  const text = LOCALIZED_TEXT[task.language];
+  const remarksMarkdown = formatRemarks(task, remarks);
+  const scoreSummaryMarkdown = buildScoreSummaryBlock(clarityScore, smartAnalysis);
+  const clarityScoreMarkdown = buildClarityScoreBlock(clarityScore);
+  const smartAnalysisMarkdown = formatSmartAnalysisMarkdown(smartAnalysis);
+  const toneOfVoiceMarkdown = buildToneOfVoiceBlock(toneOfVoice);
+
+  return [
+    '<!-- clarity-guardian:analysis -->',
+    text.commentTitle,
+    '',
+    getStatusLine(task, remarks),
+    '',
+    `**${text.objectLabel}:** ${task.type === 'pr' ? 'Pull Request' : 'Issue'}`,
+    `**${text.typeLabel}:** ${task.workItemType}`,
+    `**${text.modeLabel}:** ${mode}`,
+    `**${text.languageLabel}:** ${task.language}`,
+    '',
+    scoreSummaryMarkdown,
+    '',
+    clarityScoreMarkdown,
+    '',
+    smartAnalysisMarkdown,
+    '',
+    toneOfVoiceMarkdown,
+    '',
+    clarityFixSuggestionsMarkdown,
+    '',
+    '---',
+    '',
+    text.whatToFix,
+    '',
+    remarksMarkdown || text.noRemarks,
+    '',
+    text.managerRecommendations,
+    '',
+    formatRecommendations(managerRecommendations),
+    '',
+    '---',
+    '',
+    managerChecklist,
+    '',
+    '---',
+    '',
+    text.footer
+  ].join('\n');
+}
+
+function buildDescriptionBlock(
+  task: NormalizedTask,
+  remarks: Remark[],
+  mode: ClarityMode,
+  clarityScore: ClarityScoreResult,
+  smartAnalysis: SmartAnalysisResult,
+  toneOfVoice: ToneAnalysisResult,
+  clarityFixSuggestionsMarkdown: string,
+  managerRecommendations: string[]
+): string {
+  const text = LOCALIZED_TEXT[task.language];
+  const remarksMarkdown = formatRemarks(task, remarks);
+  const scoreSummaryMarkdown = buildScoreSummaryBlock(clarityScore, smartAnalysis);
+  const clarityScoreMarkdown = buildClarityScoreBlock(clarityScore);
+  const smartAnalysisMarkdown = formatSmartAnalysisMarkdown(smartAnalysis);
+  const toneOfVoiceMarkdown = buildToneOfVoiceBlock(toneOfVoice);
+
+  return [
+    text.descriptionTitle,
+    '',
+    getStatusLine(task, remarks),
+    '',
+    `- ${text.objectLabel}: ${task.type === 'pr' ? 'Pull Request' : 'Issue'}`,
+    `- ${text.typeLabel}: ${task.workItemType}`,
+    `- ${text.modeLabel}: ${mode}`,
+    `- ${text.languageLabel}: ${task.language}`,
+    '',
+    scoreSummaryMarkdown,
+    '',
+    clarityScoreMarkdown,
+    '',
+    smartAnalysisMarkdown,
+    '',
+    toneOfVoiceMarkdown,
+    '',
+    clarityFixSuggestionsMarkdown,
+    '',
+    remarksMarkdown || text.noRemarks,
+    '',
+    text.managerRecommendations,
+    '',
+    formatRecommendations(managerRecommendations)
+  ].join('\n');
+}
+
+function normalizeTask(task: TaskPayload, config: ResolvedConfig): NormalizedTask {
+  const language = detectLanguage(task, config);
+  const workItemType = detectWorkItemType(task);
+
+  return {
+    title: normalizeText(task.title),
+    body: normalizeText(task.body),
+    labels: (task.labels || []).map((label) => normalizeText(label)).filter(Boolean),
+    type: task.type === 'pr' ? 'pr' : 'issue',
+    workItemType,
+    language
+  };
+}
+
+function buildUpdatedBody(body: string, descriptionMarkdown: string): string {
+  const managedBlock = [
+    DESCRIPTION_START_MARKER,
+    descriptionMarkdown,
+    DESCRIPTION_END_MARKER
+  ].join('\n');
+
+  return replaceManagedBlock(
+    body,
+    DESCRIPTION_START_MARKER,
+    DESCRIPTION_END_MARKER,
+    managedBlock
+  );
+}
+
+export function analyzeTask(
+  task: TaskPayload,
+  options: {
+    config?: ResolvedConfig;
+  } = {}
+): AnalysisResult {
+  const config = options.config || loadConfig();
+  const originalBody = normalizeText(task.body);
+  const bodyWithoutManagedBlock = stripManagedBlock(
+    originalBody,
+    DESCRIPTION_START_MARKER,
+    DESCRIPTION_END_MARKER
+  );
+  const normalizedTask = normalizeTask(
+    {
+      ...task,
+      body: bodyWithoutManagedBlock
+    },
+    config
+  );
+
+  const requiredSections = getRequiredSections(
+    config,
+    normalizedTask.language,
+    normalizedTask.workItemType
+  );
+
+  const stopPhrases = getStopPhrases(
+    config,
+    normalizedTask.language,
+    normalizedTask.workItemType
+  );
+
+  const remarks = [
+    ...analyzeRequiredSections(
+      normalizedTask.body,
+      requiredSections,
+      normalizedTask.language,
+      config.mode,
+      normalizedTask.workItemType
+    ),
+    ...analyzeStopPhrases(
+      `${normalizedTask.title}\n${normalizedTask.body}`,
+      stopPhrases,
+      normalizedTask.language,
+      config.mode
+    )
+  ];
+
+  const hasErrors = remarks.some((remark) => remark.level === 'error');
+  const hasWarnings = remarks.some((remark) => remark.level === 'warning');
+  const clarityScore = calculateClarityScore({
+    title: normalizedTask.title,
+    body: normalizedTask.body,
+    remarks,
+    scoring: config.scoring
+  });
+  const smartAnalysis = analyzeSmartTask(`${normalizedTask.title}\n${normalizedTask.body}`);
+  const toneOfVoice = analyzeToneOfVoice(`${normalizedTask.title}\n${normalizedTask.body}`, {
+    badFormulations: config.badFormulations,
+    language: normalizedTask.language,
+    workItemType: normalizedTask.workItemType
+  });
+  const managerRecommendations = generateManagerRecommendations(
+    normalizedTask,
+    remarks,
+    clarityScore
+  );
+  const clarityFixSuggestions = generateClarityFixSuggestions({
+    task: normalizedTask,
+    remarks,
+    clarityScore,
+    toneOfVoice
+  });
+  const clarityFixSuggestionsMarkdown = formatClarityFixSuggestionsMarkdown(clarityFixSuggestions);
+
+  const commentMarkdown = buildManagerChecklistComment(
+    normalizedTask,
+    remarks,
+    config.mode,
+    clarityScore,
+    smartAnalysis,
+    toneOfVoice,
+    clarityFixSuggestionsMarkdown,
+    managerRecommendations
+  );
+
+  const descriptionMarkdown = buildDescriptionBlock(
+    normalizedTask,
+    remarks,
+    config.mode,
+    clarityScore,
+    smartAnalysis,
+    toneOfVoice,
+    clarityFixSuggestionsMarkdown,
+    managerRecommendations
+  );
+
+  const updatedBody = config.updateDescription
+    ? buildUpdatedBody(originalBody, descriptionMarkdown)
+    : originalBody;
+
+  return {
+    hasErrors,
+    hasWarnings,
+    mode: config.mode,
+    language: normalizedTask.language,
+    workItemType: normalizedTask.workItemType,
+    remarks,
+    clarityScore,
+    smartAnalysis,
+    toneOfVoice,
+    clarityFixSuggestions,
+    managerRecommendations,
+    commentMarkdown,
+    descriptionMarkdown,
+    updatedBody,
+    shouldUpdateDescription: config.updateDescription && updatedBody !== originalBody
+  };
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv);
+
+  const inputPath = getStringArg(args, 'input');
+  const jsonFilePath = getStringArg(args, 'json-file');
+  const commentFilePath = getStringArg(args, 'comment-file');
+  const updatedBodyFilePath = getStringArg(args, 'updated-body-file');
+  const configPath = getStringArg(args, 'config');
+
+  if (!inputPath) {
+    throw makeCliError('Не передан аргумент --input');
+  }
+
+  const task = readJsonFile<TaskPayload>(inputPath);
+  const config = loadConfig(configPath);
+  const result = analyzeTask(task, { config });
+
+  if (jsonFilePath) {
+    writeJsonFile(jsonFilePath, result);
+  } else {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  }
+
+  if (commentFilePath) {
+    writeTextFile(commentFilePath, result.commentMarkdown);
+  }
+
+  if (updatedBodyFilePath) {
+    writeTextFile(updatedBodyFilePath, result.updatedBody);
+  }
+}
+
+if (require.main === module) {
+  main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exit(1);
+  });
+}
